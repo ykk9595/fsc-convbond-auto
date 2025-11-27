@@ -27,7 +27,9 @@ fsc_convbond_all_in_one.py
      並輸出：
         fsc_convbond_YYYYMMDD_with_price.xlsx
         fsc_convbond_YYYYMMDD_last20.xlsx
-  5) 跑完後：用 LINE Bot 發一則摘要訊息給你
+  5) 跑完後：
+        - 用 LINE Bot 發一則簡短文字摘要
+        - 再用 LINE Flex Message 把「最後 20 筆」用卡片方式呈現
 """
 
 import datetime as dt
@@ -55,14 +57,17 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 
 def send_line_message(text: str):
-    """用 LINE Messaging API push 一則文字訊息。"""
-    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
-        print("[WARN] LINE 環境變數未設定，略過推播。")
+    """用 LINE Messaging API 推送一則純文字訊息。"""
+    token = (LINE_CHANNEL_ACCESS_TOKEN or "").strip()
+    to_id = (LINE_USER_ID or "").strip()
+
+    if not token or not to_id:
+        print("[WARN] LINE 環境變數未設定，略過文字推播。")
         return
 
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
@@ -71,7 +76,7 @@ def send_line_message(text: str):
         text = text[:1800] + "\n...(訊息過長已截斷)"
 
     body = {
-        "to": LINE_USER_ID,
+        "to": to_id,
         "messages": [
             {"type": "text", "text": text}
         ],
@@ -79,9 +84,42 @@ def send_line_message(text: str):
 
     try:
         resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
-        print(f"[LINE] status={resp.status_code}, body={resp.text}")
+        print(f"[LINE TEXT] status={resp.status_code}, body={resp.text}")
     except Exception as e:
-        print(f"[LINE] 推播失敗：{e}")
+        print(f"[LINE TEXT] 推播失敗：{e}")
+
+
+def send_flex_message(flex_content: dict):
+    """送出一則 Flex Message（Bubble 或 Carousel）。"""
+    token = (LINE_CHANNEL_ACCESS_TOKEN or "").strip()
+    to_id = (LINE_USER_ID or "").strip()
+
+    if not token or not to_id:
+        print("[WARN] LINE 環境變數未設定，略過 Flex 推播。")
+        return
+
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    body = {
+        "to": to_id,
+        "messages": [
+            {
+                "type": "flex",
+                "altText": "今日轉換公司債最後 20 筆",
+                "contents": flex_content
+            }
+        ],
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
+        print(f"[LINE FLEX] status={resp.status_code}, body={resp.text}")
+    except Exception as e:
+        print(f"[LINE FLEX] 推播失敗：{e}")
 
 
 # ========= 申報案件下載 + 篩選設定 =========
@@ -467,57 +505,121 @@ def fill_prices_for_file(csv_path: Path):
     return out_path, last20_path, n_rows
 
 
-def build_summary_message(today: dt.date, csv_path: Path,
-                          with_price_path: Path, last20_path: Path,
-                          n_rows: int) -> str:
-    """
-    組成要推播到 LINE 的文字摘要：
-      - 不再提到檔案名稱
-      - 直接將「最後 20 筆」完整列在訊息裡
-      - 資料來源：last20 的 Excel（含股價欄位）
-    """
-    try:
-        # 直接讀取 last20 的 Excel（最多 20 筆）
-        df = pd.read_excel(last20_path)
-    except Exception as e:
-        print(f"[WARN] 讀取 last20 Excel 失敗，無法組成明細：{e}")
-        df = None
+# ========= LINE 訊息內容組裝 =========
 
-    lines = []
-
-    if df is not None and not df.empty:
-        # 逐筆列出（last20.xlsx 本身就只有最後 20 筆）
-        for _, row in df.iterrows():
-            code = row.get("證券代號", "")
-            name = row.get("公司名稱", "")
-            recv = row.get("收文日期", "")
-            eff = row.get("生效日期", "")
-
-            # 這三個欄位是在 fill_prices_for_file 裡自己加的標題
-            recv_px = row.get("收文日期當天股價", "")
-            eff_px = row.get("生效日期當天股價", "")
-            today_px = row.get("今日股價", "")
-
-            # 每一筆一行，你可以依喜好調整格式
-            line = (
-                f"{code} {name}\n"
-                f"  收文:{recv}  生效:{eff}\n"
-                f"  收文價:{recv_px}  生效價:{eff_px}  今日價:{today_px}"
-            )
-            lines.append(line)
-
-    detail_str = "\n\n".join(lines) if lines else "（無明細或讀取失敗）"
-
+def build_text_summary(today: dt.date, n_rows: int) -> str:
+    """組成要推播到 LINE 的文字摘要（簡短）。"""
     msg = (
         "📊 今日轉換公司債掃描完成\n"
         f"日期：{today:%Y-%m-%d}\n"
         f"總筆數：{n_rows} 檔\n"
         "\n"
-        "📌 最後 20 筆詳細資料：\n"
-        f"{detail_str}"
+        "📌 下方為最後 20 筆 Flex 卡片明細。"
     )
     return msg
 
+
+def build_flex_carousels_from_last20(last20_path: Path):
+    """
+    讀取 last20.xlsx → 產生 Flex Message Carousel list
+    LINE 限制：一個 carousel 最多 10 個 bubble
+    所以 20 筆會拆成 2 個 carousel
+    """
+    try:
+        df = pd.read_excel(last20_path)
+    except Exception as e:
+        print(f"[WARN] 讀取 last20 excel 失敗：{e}")
+        return []
+
+    bubbles = []
+
+    for _, row in df.iterrows():
+        code = str(row.get("證券代號", ""))
+        name = str(row.get("公司名稱", ""))
+        recv = str(row.get("收文日期", ""))
+        eff = str(row.get("生效日期", ""))
+        recv_px = str(row.get("收文日期當天股價", ""))
+        eff_px = str(row.get("生效日期當天股價", ""))
+        today_px = str(row.get("今日股價", ""))
+
+        bubble = {
+            "type": "bubble",
+            "size": "micro",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"{code} {name}",
+                        "weight": "bold",
+                        "size": "sm",
+                        "wrap": True
+                    },
+                    {
+                        "type": "text",
+                        "text": f"收文：{recv}",
+                        "size": "xs",
+                        "color": "#555555",
+                        "wrap": True
+                    },
+                    {
+                        "type": "text",
+                        "text": f"生效：{eff}",
+                        "size": "xs",
+                        "color": "#555555",
+                        "wrap": True
+                    },
+                    {"type": "separator", "margin": "md"},
+                    {
+                        "type": "text",
+                        "text": f"收文價：{recv_px}",
+                        "size": "xs"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"生效價：{eff_px}",
+                        "size": "xs"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"今日價：{today_px}",
+                        "size": "xs",
+                        "weight": "bold"
+                    },
+                ]
+            }
+        }
+
+        bubbles.append(bubble)
+
+    carousels = []
+    for i in range(0, len(bubbles), 10):
+        part = bubbles[i:i+10]
+        carousels.append({
+            "type": "carousel",
+            "contents": part
+        })
+
+    return carousels
+
+
+def send_flex_last20(last20_path: Path, today: dt.date, n_rows: int):
+    """從 last20 檔案產生 Flex，並分批推播。"""
+    carousels = build_flex_carousels_from_last20(last20_path)
+    if not carousels:
+        send_line_message("⚠ 轉換公司債最後 20 筆 Flex 生成失敗，請稍後檢查程式。")
+        return
+
+    # 先送簡短摘要文字
+    summary = build_text_summary(today, n_rows)
+    send_line_message(summary)
+
+    # 再依序送出 1~2 則 Flex（每則最多 10 個卡片）
+    for idx, c in enumerate(carousels, start=1):
+        print(f"[INFO] 推送 Flex Carousel #{idx}")
+        send_flex_message(c)
 
 
 # ========= 整合主程式 =========
@@ -536,11 +638,9 @@ def main():
     # 2) 接著執行「程式2」：讀取 CSV，補股價 & 成交量，輸出 with_price / last20
     with_price_path, last20_path, n_rows = fill_prices_for_file(csv_path)
 
-    # 3) 組訊息，推播到 LINE
-    text = build_summary_message(today, csv_path, with_price_path, last20_path, n_rows)
-    send_line_message(text)
+    # 3) 用 Flex Message 呈現最後 20 筆
+    send_flex_last20(last20_path, today, n_rows)
 
 
 if __name__ == "__main__":
     main()
-
