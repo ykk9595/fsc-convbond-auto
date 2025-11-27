@@ -13,7 +13,7 @@ fsc_convbond_all_in_one.py
   3) 在「案件類別」欄位中，篩選包含「轉換公司債」的列
        - 只保留欄位：證券代號、公司型態、結案類型、公司名稱、收文日期、生效日期
        - 另存成 CSV：fsc_convbond_YYYYMMDD.csv
-  4) 立刻讀取 fsc_convbond_YYYYMMDD.csv，依欄位：
+  4) 讀取 fsc_convbond_YYYYMMDD.csv，依欄位：
         A：證券代號
         E：收文日期
         F：生效日期
@@ -27,14 +27,16 @@ fsc_convbond_all_in_one.py
      並輸出：
         fsc_convbond_YYYYMMDD_with_price.xlsx
         fsc_convbond_YYYYMMDD_last20.xlsx
+  5) 跑完後：用 LINE Bot 發一則摘要訊息給你
 """
 
 import datetime as dt
 import io
-import sys
 from typing import Optional
 from pathlib import Path
 import re
+import os
+import json
 
 import pandas as pd
 import requests
@@ -42,6 +44,44 @@ import yfinance as yf
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl import Workbook
+
+
+# ========= LINE Bot 設定 =========
+# 在 GitHub Actions 的 Secrets 設兩個：
+#   LINE_CHANNEL_ACCESS_TOKEN
+#   LINE_USER_ID
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
+
+
+def send_line_message(text: str):
+    """用 LINE Messaging API push 一則文字訊息。"""
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("[WARN] LINE 環境變數未設定，略過推播。")
+        return
+
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    # LINE 單則訊息上限 2000 字元，保守抓 1800
+    if len(text) > 1800:
+        text = text[:1800] + "\n...(訊息過長已截斷)"
+
+    body = {
+        "to": LINE_USER_ID,
+        "messages": [
+            {"type": "text", "text": text}
+        ],
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
+        print(f"[LINE] status={resp.status_code}, body={resp.text}")
+    except Exception as e:
+        print(f"[LINE] 推播失敗：{e}")
 
 
 # ========= 申報案件下載 + 篩選設定 =========
@@ -301,6 +341,7 @@ def fill_prices_for_file(csv_path: Path):
       - 讀取 fsc_convbond_YYYYMMDD.csv （或 .xlsx）
       - 依收文 / 生效 / 今日，補上股價 + 成交量
       - 輸出 *_with_price.xlsx 與 *_last20.xlsx
+    回傳：(with_price_path, last20_path, n_rows)
     """
     original_path = csv_path
 
@@ -378,6 +419,9 @@ def fill_prices_for_file(csv_path: Path):
 
         row += 1
 
+    # 實際資料列數（不含標題）
+    n_rows = (row - START_ROW) if row > START_ROW else 0
+
     # ===== 存檔（避免檔案占用）=====
     base = xlsx_path.stem + "_with_price"
     out_path = xlsx_path.with_name(base + ".xlsx")
@@ -420,18 +464,65 @@ def fill_prices_for_file(csv_path: Path):
 
     print(f"✔ 最後 20 筆已另存：{last20_path}")
 
+    return out_path, last20_path, n_rows
+
+
+def build_summary_message(today: dt.date, csv_path: Path,
+                          with_price_path: Path, last20_path: Path,
+                          n_rows: int) -> str:
+    """組成要推播到 LINE 的文字摘要。"""
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"[WARN] 讀取 CSV 失敗，無法組成明細：{e}")
+        df = None
+
+    lines = []
+    if df is not None and not df.empty:
+        tail_df = df.tail(5)
+        for _, row in tail_df.iterrows():
+            code = row.get("證券代號", "")
+            name = row.get("公司名稱", "")
+            recv = row.get("收文日期", "")
+            eff = row.get("生效日期", "")
+            lines.append(f"{code} {name} 收文:{recv} 生效:{eff}")
+
+    detail_str = "\n".join(lines) if lines else "（無明細或讀取失敗）"
+
+    msg = (
+        "📊 今日轉換公司債掃描完成\n"
+        f"日期：{today:%Y-%m-%d}\n"
+        f"總筆數：{n_rows} 檔\n"
+        "\n"
+        "📁 檔案名稱：\n"
+        f"- {with_price_path.name}\n"
+        f"- {last20_path.name}\n"
+        "\n"
+        "📌 最後幾筆案件：\n"
+        f"{detail_str}"
+    )
+    return msg
+
 
 # ========= 整合主程式 =========
 
 def main():
+    today = dt.date.today()
+
     # 1) 先執行「程式1」：抓金管會 + 篩選轉換公司債 + 輸出 CSV
     csv_path = generate_convbond_csv_for_today()
     if csv_path is None:
-        print("[INFO] 今日沒有任何『轉換公司債』案件，流程結束。")
+        info_msg = f"📭 今日 ({today:%Y-%m-%d}) 無任何『轉換公司債』申報案件。"
+        print(info_msg)
+        send_line_message(info_msg)
         return
 
     # 2) 接著執行「程式2」：讀取 CSV，補股價 & 成交量，輸出 with_price / last20
-    fill_prices_for_file(csv_path)
+    with_price_path, last20_path, n_rows = fill_prices_for_file(csv_path)
+
+    # 3) 組訊息，推播到 LINE
+    text = build_summary_message(today, csv_path, with_price_path, last20_path, n_rows)
+    send_line_message(text)
 
 
 if __name__ == "__main__":
