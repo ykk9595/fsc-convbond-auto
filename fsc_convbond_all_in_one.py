@@ -470,38 +470,54 @@ def fill_prices_for_file(csv_path: Path):
 def build_summary_message(today: dt.date, csv_path: Path,
                           with_price_path: Path, last20_path: Path,
                           n_rows: int) -> str:
-    """組成要推播到 LINE 的文字摘要。"""
+    """
+    組成要推播到 LINE 的文字摘要：
+      - 不再提到檔案名稱
+      - 直接將「最後 20 筆」完整列在訊息裡
+      - 資料來源：last20 的 Excel（含股價欄位）
+    """
     try:
-        df = pd.read_csv(csv_path)
+        # 直接讀取 last20 的 Excel（最多 20 筆）
+        df = pd.read_excel(last20_path)
     except Exception as e:
-        print(f"[WARN] 讀取 CSV 失敗，無法組成明細：{e}")
+        print(f"[WARN] 讀取 last20 Excel 失敗，無法組成明細：{e}")
         df = None
 
     lines = []
+
     if df is not None and not df.empty:
-        tail_df = df.tail(5)
-        for _, row in tail_df.iterrows():
+        # 逐筆列出（last20.xlsx 本身就只有最後 20 筆）
+        for _, row in df.iterrows():
             code = row.get("證券代號", "")
             name = row.get("公司名稱", "")
             recv = row.get("收文日期", "")
             eff = row.get("生效日期", "")
-            lines.append(f"{code} {name} 收文:{recv} 生效:{eff}")
 
-    detail_str = "\n".join(lines) if lines else "（無明細或讀取失敗）"
+            # 這三個欄位是在 fill_prices_for_file 裡自己加的標題
+            recv_px = row.get("收文日期當天股價", "")
+            eff_px = row.get("生效日期當天股價", "")
+            today_px = row.get("今日股價", "")
+
+            # 每一筆一行，你可以依喜好調整格式
+            line = (
+                f"{code} {name}\n"
+                f"  收文:{recv}  生效:{eff}\n"
+                f"  收文價:{recv_px}  生效價:{eff_px}  今日價:{today_px}"
+            )
+            lines.append(line)
+
+    detail_str = "\n\n".join(lines) if lines else "（無明細或讀取失敗）"
 
     msg = (
         "📊 今日轉換公司債掃描完成\n"
         f"日期：{today:%Y-%m-%d}\n"
         f"總筆數：{n_rows} 檔\n"
         "\n"
-        "📁 檔案名稱：\n"
-        f"- {with_price_path.name}\n"
-        f"- {last20_path.name}\n"
-        "\n"
-        "📌 最後幾筆案件：\n"
+        "📌 最後 20 筆詳細資料：\n"
         f"{detail_str}"
     )
     return msg
+
 
 
 # ========= 整合主程式 =========
@@ -527,3 +543,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
