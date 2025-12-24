@@ -510,7 +510,7 @@ def fill_prices_for_file(csv_path: Path):
 def build_text_summary(today: dt.date, n_rows: int) -> str:
     """組成要推播到 LINE 的文字摘要（簡短）。"""
     msg = (
-        "📊 今日轉換公司債掃描完成\n"
+        "📊 今日轉換公司債/收文日/生效日/掃描完成\n"
         f"日期：{today:%Y-%m-%d}\n"
         f"總筆數：{n_rows} 檔\n"
         "\n"
