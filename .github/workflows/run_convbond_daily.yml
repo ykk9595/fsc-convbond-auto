@@ -2,8 +2,10 @@ name: Run FSC ConvBond Daily
 
 on:
   schedule:
-    # 每天台北時間 07:20 執行（前一天 23:20 UTC）
-    - cron: "20 23 * * *"
+    # 每日 台北時間 01:00（UTC 17:00）
+    - cron: "0 17 * * *"
+    # 每日 台北時間 12:00（UTC 04:00）
+    - cron: "0 4 * * *"
   # 手動啟動（方便測試）
   workflow_dispatch: {}
 
